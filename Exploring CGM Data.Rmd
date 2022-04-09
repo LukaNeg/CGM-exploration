@@ -1,0 +1,19 @@
+---
+title: "Exploring CGM Data"
+author: "Luka Negoita"
+date: "4/9/2022"
+output: html_document
+---
+
+## Introduction
+Here my goal is to begin exploring some CGM (continuous glucose monitoring) data to get a better understanding for how to work with these types of data and what their potential are. This was inspired by Irina Gaynanova's website (https://irinagain.github.io/CGM/) where her lab group worked on compiling CGM datasets and calculating various statistics from these data. In fact, they also created an R package and associated shiny app for exploring CGM data, which I may use in this exploration here.
+
+### The Data
+The data come from this repository: (https://github.com/irinagain/Awesome-CGM) where Itina Gaynanova and her colleagues compiled free and available CGM datasets.
+
+
+## References
+
+> Broll S*, Buchanan D*, Chun E*, Muschelli J*, Fernandes N*, Seo J*, Shih J*, Urbanek J, Schwenck J*, Gaynanova I (2021). iglu: Interpreting Glucose Data from Continuous Glucose Monitors. R package version 3.0.0. R package version 3.1.0
+
+> Mary Martin, Elizabeth Chun, David Buchanan, Eric Wang, Sangaman Senthil & Irina Gaynanova. (2020, June 15). irinagain/Awesome-CGM: List of public CGM datasets (Version v1.0.0). Zenodo.
