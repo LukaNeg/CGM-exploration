@@ -51,12 +51,16 @@ Load the necessary packages and functions here:
 library(tidyverse) # for magic
 library(RSQLite) # for loading SQLite data
 library(iglu) # for CGM metrics
-library(stats) # for kmeans
-#library(cluster)    # clustering algorithms
 library(factoextra) # clustering algorithms & visualization
 library(ggforce) # add ellipses to pca plots
 library(concaveman) # for adding hulls to pca plots
 library(vegan) # for NMDS analysis
+library(caret) # for cross-validation
+library(ropls) # for PCA and PLS regression (to install: https://rdrr.io/bioc/ropls/)
+library(chemhelper) # for use with ropls (to install: https://rdrr.io/github/Aariq/chemhelper/f/README.md)
+library(ggrepel) # add labels to a plot that don't overlap
+library(glue) # for formatting strings of text in figures
+library(cowplot) # for plotting multiple plots together
 ```
 
 ## Upload data
@@ -119,6 +123,8 @@ person_metrics <- left_join(above, below, by="id") %>%
 ```
 Now, I'm curious to see how well these very basic data about percentages above and below certain glucose thresholds (and the median) can be used to predict the predicted diabetes diagnosis from Hall et al. 2018.
 
+### Simple K-Means
+
 First let's do a simple k-means cluster analysis and color the points based on diagnosis to see if any pattern emerges. But first have to remove (or impute the missing values in our dataset):
 
 ```{r}
@@ -135,21 +141,23 @@ person_metrics_dist <- dist(person_metrics_std[,-1]) #default is bray
 ```{r}
 set.seed(123)
 cluster1 <- kmeans(person_metrics_std[,-1], 3)
-hall_subject_data_clean$cluster <- cluster1$cluster
-
+cluster1$cluster
 # Now create a simple PCA ordination to visualize
-
 pca <- princomp(person_metrics_std[,-1])
 pca_coords <- pca$scores[,1:2]
-pca_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(pca_coords))
-# also make the clusters categoric:
-pca_data_fin$cluster <- as.factor(pca_data_fin$cluster)
+# hall_subject_data_clean$cluster <- cluster1$cluster
+pca_data_fin <- bind_cols(hall_subject_data_clean, 
+                          as_tibble(pca_coords), 
+                          as_tibble(cluster1$cluster)) %>% 
+  rename(cluster1 = value) %>% 
+  # also make the clusters categoric:
+  mutate(cluster1 = as.factor(cluster1))
 ```
 Now to visualize these results:
 
 ```{r}
 ggplot(data=pca_data_fin) + 
-  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster, 
+  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster1, 
                      fill=after_scale(alpha(color, 0.2))), 
                  concavity=0.2, size=0.2, show.legend=FALSE) +
   geom_point(aes(x=Comp.1, y=Comp.2, color=diagnosis),
@@ -165,17 +173,18 @@ Ok, but the problem is that the data look like the are not normally distributed 
 # use the previously calculated distance matrix for the nmds
 set.seed(111)
 nmds1 = metaMDS(person_metrics_dist, k=2) # K = number of reduced dimensions
-
 nmds_coords <- nmds1$points
-nmds_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(nmds_coords))
-# also make the clusters categoric:
-nmds_data_fin$cluster <- as.factor(nmds_data_fin$cluster)
-
+nmds_data_fin <- bind_cols(hall_subject_data_clean, 
+                           as_tibble(nmds_coords), 
+                           as_tibble(cluster1$cluster)) %>% 
+  rename(cluster1 = value) %>% 
+  # also make the clusters categoric:
+  mutate(cluster1 = as.factor(cluster1))
 ```
 
 ```{r}
 ggplot(data=nmds_data_fin) + 
-  geom_mark_hull(aes(x=MDS1, y=MDS2, color=cluster, 
+  geom_mark_hull(aes(x=MDS1, y=MDS2, color=cluster1, 
                      fill=after_scale(alpha(color, 0.2))), 
                  concavity=0.2, size=0.2, show.legend=FALSE) +
   geom_point(aes(x=MDS1, y=MDS2, color=diagnosis),
@@ -188,9 +197,7 @@ ggplot(data=nmds_data_fin) +
 I guess not much difference from the PCA... Oh well! But what's cool to see is that even with some REALLY basic metrics we can start to see a bit of association between the clusters and Hall et al. (2018) predictions. What happens when we add some other basic features such as BMI and age?
 
 ```{r}
-person_metrics_updated <- left_join(person_metrics, hall_subject_data_clean, by="id") %>% 
-  # Remove the previous clusters:
-  select(-cluster)
+person_metrics_updated <- left_join(person_metrics, hall_subject_data_clean, by="id")
 
 # Now need to fill in NAs (can just use the mean of each column):
 person_metrics_updated[!complete.cases(person_metrics_updated),]
@@ -210,18 +217,21 @@ person_metrics_upd <- select(person_metrics_updated_std, -diagnosis, -id)
 
 # Then finally, calcuate the clusters and PCA again:
 set.seed(123)
-cluster2 <- kmeans(person_metrics_upd, 3)
-hall_subject_data_clean$cluster2 <- cluster2$cluster
-
+cluster2 <- kmeans(person_metrics_std[,-1], 3)
+cluster2$cluster
 # Now create a simple PCA ordination to visualize
-pca <- princomp(person_metrics_upd)
+pca <- princomp(person_metrics_std[,-1])
 pca_coords <- pca$scores[,1:2]
-pca_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(pca_coords))
-# also make the clusters categoric:
-pca_data_fin$cluster <- as.factor(pca_data_fin$cluster2)
+# hall_subject_data_clean$cluster <- cluster1$cluster
+pca_data_fin <- bind_cols(hall_subject_data_clean, 
+                          as_tibble(pca_coords), 
+                          as_tibble(cluster2$cluster)) %>% 
+  rename(cluster2 = value) %>% 
+  # also make the clusters categoric:
+  mutate(cluster2 = as.factor(cluster2))
 
 ggplot(data=pca_data_fin) + 
-  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster, 
+  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster2, 
                      fill=after_scale(alpha(color, 0.2))), 
                  concavity=0.2, size=0.2, show.legend=FALSE) +
   geom_point(aes(x=Comp.1, y=Comp.2, color=diagnosis),
@@ -231,7 +241,102 @@ ggplot(data=pca_data_fin) +
   theme_minimal() +
   theme(panel.border = element_rect(fill= "transparent"))
 ```
-Not that much more different. I think next it is time to bring out the big guns and add in many more of Gaynanova's metrics and use those to actually train a model for predicting Hall's predicted diagnoses using KNN, Decision Trees, etc.
+Not that much more different. Overall, it looks like cluster 1 is pretty much non-diabetic, cluster 2 is pre-diabetic or diabetic, and cluster 3 is a mix. I think next it is time to bring out the big guns and add in many more of Gaynanova's metrics and use those to actually train a model for predicting Hall's predicted diagnoses using KNN, Decision Trees, etc.
+
+### Predicting Hall diagnosis with supervised ML
+
+Let's try logitic regression, k-NN, a Decision Tree, Partial Least Squares-Discriminant Analysis, and Random Forest together with more of Gaynanova's metrics and compare results. But first, since there are *a lot* of metrics, we should do a bit of feature selection and remove as much multicollinearity/redunancy as possible (though not always necessary to do this).
+
+First calculate all of Gaynanaova's metrics:
+```{r message=FALSE}
+# # note that this also computes interpolation of missing time points in the data for calculating all the time-dependent metrics.
+# hall_full <- all_metrics(clean_hall_data)
+# # add the diagnoses too:
+# hall_full_diag <- left_join(hall_full, select(hall_subject_data_clean, id, diagnosis))
+# # export this so that I don't have to recalculate the metrics each time since it takes a little while:
+# write.csv(hall_full_diag, "clean_data/hall_full.csv", row.names=FALSE)
+hall_full <- read_csv("clean_data/hall_full.csv")
+head(hall_full)
+# Also normalize/scale the features:
+# Need to add "as.numeric" because scale for some reason is not returning a pure numeric
+hall_full_std <- mutate(hall_full, across(where(is.double), ~ as.numeric(scale(.x))))
+```
+
+#### PCA
+
+```{r fig.height=5, fig.width=10, fig.cap="PCA score and loading plot."}
+all_metrics_pca <- opls(dplyr::select(hall_full_std, -id, -diagnosis), predI = 10, fig.pdfC="none") 
+pca_data <- as_tibble(all_metrics_pca@suppLs$xModelMN)
+pca_scores <- get_scores(all_metrics_pca)
+
+pca_cor_dat <-
+  cor(pca_scores[,2:3], pca_data) %>%
+    t() %>%
+    as_tibble(rownames = "variable")
+
+# pca.cor.dat
+pca_loading_plot <-
+  ggplot(pca_cor_dat) +
+  geom_segment(aes(x = 0, y = 0, xend = p1, yend = p2),
+               arrow = arrow(length = unit(0.15, "cm"))) +
+  # gghighlight(p.adj < 0.05, use_direct_label = FALSE) +
+  geom_label_repel(aes(x = p1, y = p2, label = variable),
+                   segment.alpha = 0.6, direction = "y", size = 3, point.padding = 0.2,
+                   min.segment.length = 0, force = 5, max.overlaps=25) +
+  theme_bw() +
+  labs(x = "Correlation to PC1",
+       y = "Correlation to PC2",
+       title = "PCA correlation plot")
+
+mycolors <- c("diabetic" = "#455d95", "non-diabetic" = "#eea587", "pre-diabetic" = "#8f9bbe")
+pca_score_dat <- get_plotdata(all_metrics_pca)
+pca_score_plot <-
+  ggplot(pca_score_dat$scores, aes(x = p1, y = p2, color = hall_full_std$diagnosis)) +
+  geom_point(size = 3) +
+  scale_color_manual("Hall Prediction:", values = mycolors) +
+  labs(x = glue("PC1 ({all_metrics_pca@modelDF$R2X[1]*100}%)"),
+       y = glue("PC2 ({all_metrics_pca@modelDF$R2X[2]*100}%)"),
+       title = "PCA score plot") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+plot_grid(pca_loading_plot,
+          pca_score_plot + 
+            theme(legend.position = "bottom"),
+          ncol = 2, nrow = 1)
+```
+
+You can see that there is a lot of potential correlation between the metrics (i.e., a lot of redundancy), but more than 75% of the variation is captured by just two axes. There's a bit of a distinction in the three diagnosis predictions, but they still aren't too strong. Next step is to do some actual supervised modeling.
+
+#### PLS-DA
+
+
+```{r results="hide", echo=TRUE}
+# Try PLSDA with different numbers of predictive axes to see what 
+# is optimal and reduce overfitting
+plsda_results <- tibble(NULL)
+for(i in 1:5){
+  all_metrics_plsda <-
+  opls(
+    x = dplyr::select(hall_full_std, -id, -diagnosis), #X data
+    y = hall_full_std$diagnosis, #Y data
+    fig.pdfC = "none", #suppresses default plotting
+    predI = i, # set number of predictive axes
+    permI = 200) #use 200 permutations to generate a p-value
+  
+  plsda_results <- bind_rows(plsda_results, 
+                             as_tibble(all_metrics_plsda@summaryDF))
+}
+```
+```{r}
+plsda_results
+```
+
+R2X(cum) is the proportion of variation in the data explained by the predictive axes (the CGM metrics) (R^2). R2Y(cum) is the proportion of variation in the diagnoses explained by the model. With one predictive component (first row), PLS-DA explains 55.4% of total variation, but only explains 16.6% of the difference between diagnoses. Q2(cum) is the predictive power of the model calculated through cross-validation, but it can never be greater than R2Y(cum). In some ways this metric is the most important because we want to understand the predictive power of the model, which in this case looks to be around 10% (if I understand 'Q2(cum)' correctly). Finally, the columns pR2Y and pQ2 are permutation generated p-values based on R^2 or Q^2 values.
+
+Thus, we can say that one predictive component yields the greatest predictive power (though only around 10%), but that this predictive power is statistically significant (p < 0.05). Yay! Ok, but 10% predictive power is really not great.
+
+
 
 
 
