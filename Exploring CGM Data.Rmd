@@ -474,12 +474,78 @@ Though the model isn't perfect, it does shed some light on which features might 
 ```{r fig.height=5, fig.width=7}
 varImpPlot(m_rf$finalModel)
 ```
-But I'm still not pleased with this. There is a lot of collinearity in the data, so what if we used the top 6 PCA components as the features instead? And boost the tree?
+But I'm still not pleased with this. There is a lot of collinearity in the data, so what if we used the top 6(?) PCA components as the features instead? And boost the tree?
 
 ### PCA Decision Tree (boosted?)
 ```{r}
 
+all_metrics_pca <- opls(dplyr::select(hall_full_std, -id, -diagnosis), predI = 6, fig.pdfC="none") 
+pca_scores <- get_scores(all_metrics_pca)
+pca_scores$sample <- hall_full_mod$diagnosis
+hall_pca_metrics <- rename(pca_scores, diagnosis = sample)
+hall_pca_metrics
 ```
+So here are our new data! Now uses a 6-fold cross-validation as before:
+```{r}
+set.seed(123)
+folds <- createFolds(hall_pca_metrics$diagnosis, k = 6)
+
+cv_PCA_results <- lapply(folds, function(x) {
+  hall_train <- hall_pca_metrics[-x,]
+  hall_test <- hall_pca_metrics[x,]
+  simp_tree <- rpart(diagnosis ~ ., data = hall_pca_metrics)
+  diag_pred <- predict(simp_tree, hall_test, type = 'class')
+  diag_actual <- as.factor(hall_test$diagnosis)
+  result <- confusionMatrix(diag_pred, diag_actual, positive='potential-diabetic')
+  return(list(result$overall["Kappa"], result$overall["Accuracy"]))
+})
+results_clean <- unlist(cv_PCA_results)
+
+accuracy <- results_clean[grepl("Accuracy", names(results_clean))]
+kappa <- results_clean[grepl("Kappa", names(results_clean))]
+
+mean(accuracy)
+mean(kappa)
+```
+Wow! That's pretty good for a simple decision tree! What about boosting it?
+
+```{r include=FALSE}
+library(C50)
+```
+
+
+```{r}
+# Same as above but boosted and using C5.0 method:
+cv_PCA_results <- lapply(folds, function(x) {
+  hall_train <- hall_pca_metrics[-x,]
+  hall_test <- hall_pca_metrics[x,]
+  simp_tree <- C5.0(as.factor(diagnosis) ~ ., data = hall_pca_metrics, trials = 10)
+  diag_pred <- predict(simp_tree, hall_test, type = 'class')
+  diag_actual <- as.factor(hall_test$diagnosis)
+  result <- confusionMatrix(diag_pred, diag_actual, positive='potential-diabetic')
+  return(list(result$overall["Kappa"], result$overall["Accuracy"]))
+})
+results_clean <- unlist(cv_PCA_results)
+
+accuracy <- results_clean[grepl("Accuracy", names(results_clean))]
+kappa <- results_clean[grepl("Kappa", names(results_clean))]
+
+mean(accuracy)
+mean(kappa)
+```
+AMAZING. That's cool, we've gotten accuracy up to 87% and the kappa up to 0.68.
+```{r}
+# Don't know why this gives me an error when I knit:
+#C5imp(simp_tree)
+```
+Interestingly, when looking at the variable importance of each PCA component, it seemed like the components were not totally in order of their importance of explaining overall variation in the data.
+
+## Conclusion
+
+This is only a temporary conclusion, but for now, the interesting finding is that Gaynanova's metrics can provide a simple way of characterizing Hall (2018)'s glycemic signatures (glucotypes) with a fairly good accuracy of 87% and kappa of 0.68. The key was using a boosted decision tree *after* reducing dimensionality with a basic PCA ordination. The boosted tree that used the first 6 components of the PCA was even more superior than using a tuned randomForest that could use any features it wanted.
+
+There's much more to be done, but I'll end it here for now.
+
 
 
 ## References
