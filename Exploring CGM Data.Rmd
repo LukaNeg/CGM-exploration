@@ -215,7 +215,7 @@ person_metrics_updated_std <- mutate(person_metrics_updated_all,
 # Remove the diagnosis and id columns:
 person_metrics_upd <- select(person_metrics_updated_std, -diagnosis, -id)
 
-# Then finally, calcuate the clusters and PCA again:
+# Then finally, calculate the clusters and PCA again:
 set.seed(123)
 cluster2 <- kmeans(person_metrics_std[,-1], 3)
 cluster2$cluster
@@ -262,7 +262,7 @@ head(hall_full)
 hall_full_std <- mutate(hall_full, across(where(is.double), ~ as.numeric(scale(.x))))
 ```
 
-#### PCA
+### Preliminary PCA
 
 ```{r fig.height=5, fig.width=10, fig.cap="PCA score and loading plot."}
 all_metrics_pca <- opls(dplyr::select(hall_full_std, -id, -diagnosis), predI = 10, fig.pdfC="none") 
@@ -308,7 +308,7 @@ plot_grid(pca_loading_plot,
 
 You can see that there is a lot of potential correlation between the metrics (i.e., a lot of redundancy), but more than 75% of the variation is captured by just two axes. There's a bit of a distinction in the three diagnosis predictions, but they still aren't too strong. Next step is to do some actual supervised modeling.
 
-#### PLS-DA
+### PLS-DA
 
 
 ```{r results="hide", echo=TRUE}
@@ -336,12 +336,154 @@ R2X(cum) is the proportion of variation in the data explained by the predictive 
 
 Thus, we can say that one predictive component yields the greatest predictive power (though only around 10%), but that this predictive power is statistically significant (p < 0.05). Yay! Ok, but 10% predictive power is really not great.
 
+### Decision Tree
+
+Load some necessary packages:
+```{r}
+library(rpart) # decision trees
+library(rpart.plot) # decision tree visualizations
+```
+
+Take a look at our categories (something I should have done way sooner!):
+```{r}
+table(hall_full$diagnosis)
+```
+
+Actually, since there are so few diabetic classifications (only 5!), maybe it's way better to lump diabetic and pre-diabetic into one "potential-diabetic" grouping:
+```{r}
+hall_full_mod <- mutate(hall_full, diagnosis = case_when(diagnosis == "diabetic" ~ "potential-diabetic",
+                                                         diagnosis == "pre-diabetic" ~ "potential-diabetic",
+                                                         TRUE ~ "non-diabetic"))
+table(hall_full_mod$diagnosis)
+```
+That's better!
+
+Next, split the data into training and test:
+```{r}
+set.seed(123)
+hall_train <- sample_frac(hall_full_mod, 0.7)
+hall_test  <- anti_join(hall_full_mod, hall_train, by = 'id')
+
+#Make sure we have all classes present in each:
+table(hall_test$diagnosis)
+table(hall_train$diagnosis)
+```
 
 
+Now setup the decision tree model and test it with just a few variables:
+```{r}
+#names(hall_train)
+simp_tree <- rpart(diagnosis ~ Median + above_250 + above_180 + above_140 + below_54 + below_70, data = hall_train)
+rpart.plot(simp_tree)
+```
+Oh wow, it chose to use just median! I wonder how accurate that is though?
+```{r}
+printcp(simp_tree)
+
+p <- predict(simp_tree, hall_test, type = 'class')
+confusionMatrix(p, as.factor(hall_test$diagnosis), positive='potential-diabetic')
+```
+The p-value here indicates that there is a "significant" predictive ability beyond the percent of imbalance in the data (for example, there are 9 non-diabetics in theis test set vs. 8 potential-diabetics, so by chance alone you are more likely to predict non-diabetics because there are more than 50% of those, the "no information rate"). The accuracy is 0.7647, with a 95% confidence interval between 0.501 and 0.9319. OK, so it's not GREAT, but still, for ONE feature?? Then there's the kappa value of 0.5211 
+
+> Kappa value interpretation Landis & Koch (1977):
+> <0 No agreement
+> 0 — .20 Slight
+> .21 — .40 Fair
+> .41 — .60 Moderate
+> .61 — .80 Substantial
+> .81–1.0 Perfect
+
+But see this... https://towardsdatascience.com/interpretation-of-kappa-values-2acd1ca7b18f
+
+Ok, but it also might be overfitting a really tiny dataset that we have. What happens if we use a k-fold cross-validation technique on this instead? Let's try that:
+```{r}
+# this creates random stratified folds to ensure a balance between the classes in each set (the diagnoses)
+set.seed(123)
+folds <- createFolds(hall_full_mod$diagnosis, k = 6)
+str(folds)
+```
+```{r}
+cv_results <- lapply(folds, function(x) {
+  hall_train <- hall_full_mod[-x,]
+  hall_test <- hall_full_mod[x,]
+  simp_tree <- rpart(diagnosis ~ Median + above_250 + above_180 + above_140 + below_54 + below_70, data = hall_train)
+  diag_pred <- predict(simp_tree, hall_test, type = 'class')
+  diag_actual <- as.factor(hall_test$diagnosis)
+  result <- confusionMatrix(diag_pred, diag_actual, positive='potential-diabetic')
+  return(list(result$overall["Kappa"], result$overall["Accuracy"]))
+})
+results_clean <- unlist(cv_results)
+
+accuracy <- results_clean[grepl("Accuracy", names(results_clean))]
+kappa <- results_clean[grepl("Kappa", names(results_clean))]
+
+mean(accuracy)
+mean(kappa)
+```
+Ok, so this doesn't look quite as encouraging anymore. And this is probably from the fact that we have so little data and used very few features. What about using Random Forest so that we can add more features?
+
+### Random Forest
+```{r message=FALSE, warning=FALSE}
+library(randomForest) # for random forests!
+```
+
+```{r}
+set.seed(123)
+# Need to fix the data so that there are no spaces in the feature names for `randomForest()` to work:
+names(hall_full_mod) <- str_replace(names(hall_full_mod), " ", "_")
+hall_full_rf <- hall_full_mod
+names(hall_full_rf) <- sub("^","i",names(hall_full_mod)) # and add a i to the start (for now)
+hall_full_rf <- select(hall_full_rf, -iid) # remove ID
+
+partition <- createDataPartition(hall_full_rf$idiagnosis, p = .7, list=F)
+hall_train <- hall_full_rf[partition,-1]
+hall_test <- hall_full_rf[-partition,-1]
+```
+
+```{r}
+
+set.seed(123)
+hall_rf <- randomForest(as.factor(idiagnosis) ~ ., # try all features
+                        mtry = 10, # select 10 random features each time
+                        ntree = 500, # number of trees
+                        data = hall_train)
+```
+```{r}
+p <- predict(hall_rf, hall_test, type = 'class')
+confusionMatrix(p, as.factor(hall_test$idiagnosis), positive='potential-diabetic')
+```
+Accuracy of 75% and Kappa of 0.41. Can we tune this forest?
+
+```{r}
+# set training options (6-fold cross val + 10 repeats)
+ctrl <- trainControl(method = "repeatedcv", number = 6, repeats = 10)
+
+# create a grid of how many features it tries at any one time:
+grid_rf <- expand.grid(.mtry = c(2, 5, 10, 20, 35))
+
+set.seed(123)
+m_rf <- train(as.factor(idiagnosis) ~ ., data = hall_full_rf, method = "rf",
+              metric = "Kappa", trControl = ctrl,
+              tuneGrid = grid_rf)
+m_rf
+```
+Ok, so it looks like the best we can get is around an accuracy of 64% with a kappa of .17
+
+Though the model isn't perfect, it does shed some light on which features might be more important:
+
+```{r fig.height=5, fig.width=7}
+varImpPlot(m_rf$finalModel)
+```
+But I'm still not pleased with this. There is a lot of collinearity in the data, so what if we used the top 6 PCA components as the features instead? And boost the tree?
+
+### PCA Decision Tree (boosted?)
+```{r}
+
+```
 
 
 ## References
 
-> Broll S*, Buchanan D*, Chun E*, Muschelli J*, Fernandes N*, Seo J*, Shih J*, Urbanek J, Schwenck J*, Gaynanova I (2021). iglu: Interpreting Glucose Data from Continuous Glucose Monitors. R package version 3.0.0. R package version 3.1.0
+> Broll S, Buchanan D, Chun E, Muschelli J, Fernandes N, Seo J, Shih J, Urbanek J, Schwenck J, Gaynanova I (2021). iglu: Interpreting Glucose Data from Continuous Glucose Monitors. R package version 3.0.0. R package version 3.1.0
 
 > Mary Martin, Elizabeth Chun, David Buchanan, Eric Wang, Sangaman Senthil & Irina Gaynanova. (2020, June 15). irinagain/Awesome-CGM: List of public CGM datasets (Version v1.0.0). Zenodo.
