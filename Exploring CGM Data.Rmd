@@ -2,14 +2,237 @@
 title: "Exploring CGM Data"
 author: "Luka Negoita"
 date: "4/9/2022"
-output: html_document
+output: 
+  html_document: 
+    toc: yes
 ---
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  fig.width = 6, fig.align = 'center'
+)
+```
+
 
 ## Introduction
 Here my goal is to begin exploring some CGM (continuous glucose monitoring) data to get a better understanding for how to work with these types of data and what their potential are. This was inspired by Irina Gaynanova's website (https://irinagain.github.io/CGM/) where her lab group worked on compiling CGM datasets and calculating various statistics from these data. In fact, they also created an R package and associated shiny app for exploring CGM data, which I may use in this exploration here.
 
+Factors that can influence blood glucose levels include (from Gaynanova's site):
+
+> The highly non-linear and non-stationary nature of glucose profiles is due to a wide range of environmental factors including time, quantity and composition of meals, physical activity time, intensity and type, stress, and sleep quality.
+
 ### The Data
 The data come from this repository: (https://github.com/irinagain/Awesome-CGM) where Itina Gaynanova and her colleagues compiled free and available CGM datasets.
+
+The specific datasets I will use below includes Allepo et al. (2017) (https://diabetesjournals.org/care/article/40/4/538/3687/REPLACE-BG-A-Randomized-Trial-Comparing-Continuous) and Hall et al. (2018) (https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.2005143#pbio.2005143.s010)
+
+Required disclaimer:
+*The source of the data is from Allepo et al. (2017) and Hall et al. (2018), but the analyses, content and conclusions presented herein are solely the responsibility of the authors and have not been reviewed or approved by Allepo et al. (2017) or Hall et al. (2018).*
+
+### Ideas and preliminary notes
+Here are just some ideas of ways in which I could approach these data:
+
+- Basic visualizations of CGM readings by subject over time
+
+- Daily summaries of average fluctuations including variation and/or confidence ribbons
+
+- The R Package `iglu` (stands for **i**erpreting **glu**cose?) can allow the calculation of numerous metrics for blood glucose profiles which may be more or less useful for helping us analyze and quantify these profiles in various contexts.
+
+- For example, maybe these metrics can be used as features in some type of predictive model for diabetes.
+
+- Those data might also be useful for predicting future glucose levels when implementing automatic insulin supply (e.g. https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0253125)
+
+- To not reinvent the wheel, here is a good reference from the study above about the models they used for predicting glucose levels into the near future (15 and 60 minute mark) (https://doi.org/10.1371/journal.pone.0253125.s015). These included ARIMA, Support Vector Regression, Gradient-boosting trees, Feed-forward neural networks, and recurrent neural networks.
+
+- There is also this thing called a Surveillence Error Grid which assigns different levels of risk to predictions of blood glucose levels. For example, predicting a glucose level of 120 but the actual value being 500 is very risky compared to predicting 160 (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4764212/)
+
+### Packages and Functions
+Load the necessary packages and functions here:
+```{r message=FALSE, warning=FALSE}
+library(tidyverse) # for magic
+library(RSQLite) # for loading SQLite data
+library(iglu) # for CGM metrics
+library(stats) # for kmeans
+#library(cluster)    # clustering algorithms
+library(factoextra) # clustering algorithms & visualization
+library(ggforce) # add ellipses to pca plots
+library(concaveman) # for adding hulls to pca plots
+library(vegan) # for NMDS analysis
+```
+
+## Upload data
+
+### Hall 2018 data
+
+```{r message=FALSE, warning=TRUE}
+# Read the raw data in
+raw_hall_data = read_tsv("raw_data/hall-data/hall-data-main.txt")
+# I get a warning because "low" was used for a few rows of readings,
+# maybe because they were too low to for the meter.
+
+# what could these 'low' values actually be?
+sort(raw_hall_data$GlucoseValue)[1:20]
+hist(raw_hall_data$GlucoseValue, breaks=100)
+
+# Ok, so for now will fill in the "low" values in glucose with 39. I'm guessing values in the histogram didn't go much further below that.
+clean_hall_data <- select(raw_hall_data, id = subjectId, time = DisplayTime, gl = GlucoseValue) %>% 
+  mutate(gl = ifelse(is.na(gl), 39, gl))
+```
+
+Other data that also need to be uploaded:
+```{r message=FALSE, warning=FALSE}
+# meal data:
+raw_meal_metadata = read_tsv("raw_data/hall-data/hall-meal-data.tsv")
+raw_meal_metadata
+
+# Need to use SQLite for loading the subject data
+filename <- "raw_data/hall-data/hall-data-subjects.db"
+sqlite.driver <- dbDriver("SQLite")
+db <- dbConnect(sqlite.driver,
+                dbname = filename)
+dbListTables(db)
+hall_subject_data <- as_tibble(dbReadTable(db,"clinical"))
+
+# names(hall_subject_data)
+# hall_subject_data$diagnosis
+# Get just age, BMI, ID, Height, Weight, and the study's predicted diagnosis:
+
+hall_subject_data_clean <- select(hall_subject_data, id = userID, 
+                                  age = Age, BMI, height = Height,
+                                  weight = Weight, diagnosis)
+```
+## Analysis
+
+### 1) Calculating Gaynanova's metrics for this dataset:
+```{r}
+# This calculates the percent above 140, 180, and 250:
+above_percent(clean_hall_data)
+```
+Ooooh this is cool! Let's generate some features based on these types of percentages:
+
+```{r}
+above <- above_percent(clean_hall_data, targets_above = c(140, 180, 250))
+below <- below_percent(clean_hall_data, targets_below = c(54, 70))
+median_gl <- median_glu(clean_hall_data)
+
+person_metrics <- left_join(above, below, by="id") %>% 
+  left_join(median_gl, by="id")
+```
+Now, I'm curious to see how well these very basic data about percentages above and below certain glucose thresholds (and the median) can be used to predict the predicted diabetes diagnosis from Hall et al. 2018.
+
+First let's do a simple k-means cluster analysis and color the points based on diagnosis to see if any pattern emerges. But first have to remove (or impute the missing values in our dataset):
+
+```{r}
+complete.cases(person_metrics) # all there!
+```
+Then standardize all variables for PCA and also create a distance matrix for later use:
+
+```{r}
+person_metrics_std <- mutate(person_metrics, across(where(is.double), scale))
+person_metrics_dist <- dist(person_metrics_std[,-1]) #default is bray
+```
+
+
+```{r}
+set.seed(123)
+cluster1 <- kmeans(person_metrics_std[,-1], 3)
+hall_subject_data_clean$cluster <- cluster1$cluster
+
+# Now create a simple PCA ordination to visualize
+
+pca <- princomp(person_metrics_std[,-1])
+pca_coords <- pca$scores[,1:2]
+pca_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(pca_coords))
+# also make the clusters categoric:
+pca_data_fin$cluster <- as.factor(pca_data_fin$cluster)
+```
+Now to visualize these results:
+
+```{r}
+ggplot(data=pca_data_fin) + 
+  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster, 
+                     fill=after_scale(alpha(color, 0.2))), 
+                 concavity=0.2, size=0.2, show.legend=FALSE) +
+  geom_point(aes(x=Comp.1, y=Comp.2, color=diagnosis),
+             size=4) +
+  ggsci::scale_colour_npg() +
+  coord_equal() +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill= "transparent"))
+```
+Ok, but the problem is that the data look like the are not normally distributed (one of the assumptions of PCA), so why not try the non-parametric NMDS ordination:
+
+```{r}
+# use the previously calculated distance matrix for the nmds
+set.seed(111)
+nmds1 = metaMDS(person_metrics_dist, k=2) # K = number of reduced dimensions
+
+nmds_coords <- nmds1$points
+nmds_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(nmds_coords))
+# also make the clusters categoric:
+nmds_data_fin$cluster <- as.factor(nmds_data_fin$cluster)
+
+```
+
+```{r}
+ggplot(data=nmds_data_fin) + 
+  geom_mark_hull(aes(x=MDS1, y=MDS2, color=cluster, 
+                     fill=after_scale(alpha(color, 0.2))), 
+                 concavity=0.2, size=0.2, show.legend=FALSE) +
+  geom_point(aes(x=MDS1, y=MDS2, color=diagnosis),
+             size=4) +
+  ggsci::scale_colour_npg() +
+  #coord_fixed(ratio=1) +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill= "transparent"))
+```
+I guess not much difference from the PCA... Oh well! But what's cool to see is that even with some REALLY basic metrics we can start to see a bit of association between the clusters and Hall et al. (2018) predictions. What happens when we add some other basic features such as BMI and age?
+
+```{r}
+person_metrics_updated <- left_join(person_metrics, hall_subject_data_clean, by="id") %>% 
+  # Remove the previous clusters:
+  select(-cluster)
+
+# Now need to fill in NAs (can just use the mean of each column):
+person_metrics_updated[!complete.cases(person_metrics_updated),]
+# looks like it's just height and weight values
+person_metrics_updated_all <- mutate(person_metrics_updated, 
+                                     height = ifelse(is.na(height), 
+                                                     mean(height, na.rm=T),
+                                                     height),
+                                     weight = ifelse(is.na(weight), 
+                                                     mean(weight, na.rm=T),
+                                                     weight))
+# Then standardize:
+person_metrics_updated_std <- mutate(person_metrics_updated_all, 
+                                     across(where(is.double), scale))
+# Remove the diagnosis and id columns:
+person_metrics_upd <- select(person_metrics_updated_std, -diagnosis, -id)
+
+# Then finally, calcuate the clusters and PCA again:
+set.seed(123)
+cluster2 <- kmeans(person_metrics_upd, 3)
+hall_subject_data_clean$cluster2 <- cluster2$cluster
+
+# Now create a simple PCA ordination to visualize
+pca <- princomp(person_metrics_upd)
+pca_coords <- pca$scores[,1:2]
+pca_data_fin <- bind_cols(hall_subject_data_clean, as_tibble(pca_coords))
+# also make the clusters categoric:
+pca_data_fin$cluster <- as.factor(pca_data_fin$cluster2)
+
+ggplot(data=pca_data_fin) + 
+  geom_mark_hull(aes(x=Comp.1, y=Comp.2, color=cluster, 
+                     fill=after_scale(alpha(color, 0.2))), 
+                 concavity=0.2, size=0.2, show.legend=FALSE) +
+  geom_point(aes(x=Comp.1, y=Comp.2, color=diagnosis),
+             size=4) +
+  ggsci::scale_colour_npg() +
+  coord_equal() +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill= "transparent"))
+```
+Not that much more different. I think next it is time to bring out the big guns and add in many more of Gaynanova's metrics and use those to actually train a model for predicting Hall's predicted diagnoses using KNN, Decision Trees, etc.
+
 
 
 ## References
